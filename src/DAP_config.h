@@ -60,7 +60,10 @@
 #define SWO_STREAM              0
 
 /// Timestamp clock (0 = not supported).
-#define TIMESTAMP_CLOCK         0U
+/* ms-tick derived, 1us nominal granularity - bounds the DAP_SWJ_Pins wait
+ * loop (a constant-0 timestamp made that loop infinite when the waited-for
+ * pin state never occurred, wedging the whole probe) */
+#define TIMESTAMP_CLOCK         1000000U
 
 /// DAP command-channel UART not implemented.
 #define DAP_UART                0
@@ -309,8 +312,9 @@ __STATIC_INLINE void LED_RUNNING_OUT (uint32_t bit) {
 //  Timestamp
 //**************************************************************************************************
 
+extern volatile uint32_t SysTick_ms;
 __STATIC_INLINE uint32_t TIMESTAMP_GET (void) {
-  return 0;
+  return SysTick_ms * 1000u;                /* ms tick -> us-scale stamp */
 }
 
 //**************************************************************************************************
