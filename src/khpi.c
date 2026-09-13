@@ -21,6 +21,8 @@
 #include "DAP_config.h" /* PORT_SWD_SETUP, pin control                 */
 #include "debug.h"
 
+extern void Delay_Ms(uint32_t n);
+
 /* Acquire state */
 static uint16_t customAcquireTimeout = 0;   /* in 0.8ms ticks, 0 = default */
 static uint8_t  acquireDapHandshake = 0;
@@ -42,15 +44,61 @@ static void SwdRestoreResetPin(void)
     Delay_Ms(1);
 }
 
+/* ------------------------------------------------------------------ *
+ * Per-family acquire INIT sequences (ported from official KitProg3
+ * swd.c swdWriteBlockDict + per-DUT SwdAcquire* routines).
+ * req = DAP_TRANSFER flags: bit0 APnDP, bit1 RnW, bit2 A2, bit3 A3
+ * ------------------------------------------------------------------ */
+typedef struct { uint8_t req; uint32_t val; } acq_w_t;
+typedef struct {
+    uint8_t hs;             /* 0 = line reset (+J2S), 1 = dormant wake */
+    acq_w_t w[5];
+    uint8_t n;              /* number of valid writes (2..5) */
+} acq_family_t;
+
+/* dormant-to-SWD selection alert (official swd.c SwitchDormantToSwd) */
+static const uint8_t dormantWake[22] = {
+    0xFF,                                   /* >=8 SWCLK with SWDIO high   */
+    0x92, 0xF3, 0x09, 0x62,                 /* 128-bit selection alert     */
+    0x95, 0x2D, 0x85, 0x86,
+    0xE9, 0xAF, 0xDD, 0xE3,
+    0xA2, 0x0E, 0xBC, 0x19,
+    0xA0, 0xF1,                             /* 4 low + activation 0x1A + hi */
+    0xFF, 0xFF, 0xFF, 0xFF                  /* >=50 more high (tail)       */
+};
+
+static const acq_family_t acqFamilies[6] = {
+    /* [0] PSoC4 / CCGx: CTRL 0x54000000, TMR @ 0x40030014 */
+    { 0, { {0x04,0x54000000u}, {0x08,0x00000000u}, {0x01,0x00000002u},
+           {0x05,0x40030014u}, {0x0D,0x80000000u} }, 5 },
+    /* [1] PSoC5: TMR @ 0x40050210, unlock 0xEA7E30A9 */
+    { 0, { {0x05,0x40050210u}, {0x0D,0xEA7E30A9u} }, 2 },
+    /* [2] PSoC6-BLE: CTRL 0x50000000, TMR @ 0x40260100 */
+    { 1, { {0x04,0x50000000u}, {0x08,0x00000000u}, {0x01,0x00000002u},
+           {0x05,0x40260100u}, {0x0D,0x80000000u} }, 5 },
+    /* [3] TVII: TMR @ 0x40261100 */
+    { 1, { {0x04,0x50000000u}, {0x08,0x00000000u}, {0x01,0x00000002u},
+           {0x05,0x40261100u}, {0x0D,0x80000000u} }, 5 },
+    /* [4] CYW20829: CSW_PROTECT 0x23000052, TMR @ 0x40200400 */
+    { 1, { {0x04,0x50000000u}, {0x08,0x00000000u}, {0x01,0x23000052u},
+           {0x05,0x40200400u}, {0x0D,0x80000000u} }, 5 },
+    /* [5] PSoC3: TMR @ 0x00050210, unlock 0xEA7E30A9 */
+    { 1, { {0x05,0x00050210u}, {0x0D,0xEA7E30A9u} }, 2 },
+};
+
 /* One acquire attempt on the CURRENT pin mapping (g_swdSwap): XRES pulse ->
- * immediate line reset + IDCODE -> official Cypress PSoC4 INIT incl. TMR unlock. */
-static uint8_t SWD_AcquireOnce(void)
+ * handshake per family -> IDCODE -> family INIT incl. TMR unlock. dut:
+ * 0=PSoC4/CCGx, 1=PSoC5, 2=PSoC6-BLE, 3=TVII, 4=CYW20829, 5=PSoC3 */
+static uint8_t SWD_AcquireOnce(uint8_t dut)
 {
     extern volatile uint32_t SysTick_ms;
     uint32_t idr = 0;
     uint32_t t0 = 0;
     uint8_t ack;
     static const uint8_t lineResetBits[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03};
+
+    uint8_t famIdx = (dut < 6u) ? dut : 0u;     /* unknown DUT -> PSoC4 path */
+    const acq_family_t *fam = &acqFamilies[famIdx];
 
     {
         extern void Delay_Ms(uint32_t n);
@@ -96,21 +144,14 @@ static uint8_t SWD_AcquireOnce(void)
 acquired:;
 
     /* the window closes immediately after the first response - run the
-     * INIT NOW, with NO prints in between (each print costs ~ms of UART) */
-    uint8_t aCtrl, aSel, aCsw, aTar, aDrw, aRb;
-    uint32_t rbVal;
-    {
-        uint32_t v;
-        v = 0x54000000u; aCtrl = SWD_Transfer(0x04u, &v);   /* DP_W_CTRL_STAT */
-        v = 0x00000000u; aSel  = SWD_Transfer(0x08u, &v);   /* DP_W_SELECT    */
-        v = 0x00000002u; aCsw  = SWD_Transfer(0x01u, &v);   /* AP_W_CSW 32b   */
-        v = 0x40030014u; aTar  = SWD_Transfer(0x05u, &v);   /* AP_W_TAR = TMR */
-        v = 0x80000000u; aDrw  = SWD_Transfer(0x0Du, &v);   /* AP_W_DRW = TMR on */
+     * family INIT NOW, with NO prints in between (each print costs ~ms) */
+    uint8_t a[5] = {0}; uint32_t rbVal;
+    for (uint8_t k = 0; k < fam->n; k++)
+        a[k] = SWD_Transfer(fam->w[k].req, (uint32_t *)&fam->w[k].val);
 
-        SWJ_Sequence(8, (const uint8_t *)"\x00");           /* idle */
+    SWJ_Sequence(8, (const uint8_t *)"\x00");           /* idle */
 
-        rbVal = 0u; aRb = SWD_Transfer(0x0Eu, &rbVal);      /* DP_R_RDBUFF    */
-    }
+    rbVal = 0u; ack = SWD_Transfer(0x0Eu, &rbVal);      /* DP_R_RDBUFF    */
 
     /* verify: one more IDCODE read */
     uint8_t ack2;
@@ -118,14 +159,14 @@ acquired:;
     ack2 = SWD_Transfer(DAP_TRANSFER_RnW, &idr);
     SWJ_Sequence(2, (const uint8_t *)"\x00");
 
-    Debug_Print("[SWD] IDCODE idr=%08X (t=%ums) init:%u,%u,%u,%u,%u rb:%u=%08X re-idr ack=%u %08X\r\n",
-                idr, SysTick_ms - t0, aCtrl, aSel, aCsw, aTar, aDrw, aRb, rbVal, ack2, idr);
+    Debug_Print("[SWD] DUT d%u idr=%08X init:%u,%u,%u,%u,%u rb:%u=%08X re-idr ack=%u %08X\r\n",
+                dut, idr, a[0], a[1], a[2], a[3], a[4], ack, rbVal, ack2, idr);
 
     return ((ack2 == DAP_TRANSFER_OK) && (idr != 0u) && (idr != 0xFFFFFFFFu)) ? 1u : 0u;
 }
 
 /* Acquire driver: try normal pin mapping, then swapped; keep the working one */
-static uint8_t SWD_AcquireTarget(void)
+static uint8_t SWD_AcquireTarget(uint8_t dut)
 {
     PORT_SWD_SETUP();
     DAP_Data.debug_port = DAP_PORT_SWD;
@@ -137,7 +178,7 @@ static uint8_t SWD_AcquireTarget(void)
     {
         g_swdSwap = phase;
         Debug_Print("[SWD] --- phase swap=%u ---\r\n", phase);
-        if (SWD_AcquireOnce())
+        if (SWD_AcquireOnce(dut))
         {
             SwdRestoreResetPin();
             Debug_Print("[SWD] acquired with swap=%u\r\n", phase);
@@ -189,22 +230,39 @@ static void HandleReset(void)
     NVIC_SystemReset();
 }
 
+/* Virtual bootloader mode: re-enumerate as PID 0xF146 so fw-loader / the
+ * host sees a device sitting in bootloader mode. Firmware images delivered
+ * to that interface are received and discarded (no real upgrade path). */
+
+#define BOOT_FLAG_ADDR      0x20001800u     /* SRAM gap: above .bss, below stack */
+#define BOOT_FLAG_MARKER    0xB0070000u
+
+/* persist the target PID across the system reset (SRAM survives a warm
+ * reset); startup applies it to the device descriptor before USB init */
+static void PatchPid(uint16_t pid)
+{
+    /* flag word: 0xB0070000 marker | target PID in the low half */
+    *(volatile uint32_t *)BOOT_FLAG_ADDR = 0xB0070000u | pid;
+    HandleReset();                              /* warm reset, SRAM kept */
+}
+
 static void HandleModeSwitch(const uint8_t *request, uint8_t *response)
 {
     switch (request[1])
     {
     case MODE_BOOTLOADER:
-        /* No bootloader on this device: reset into the regular firmware */
-        HandleReset();
+        /* virtual bootloader: persist flag, reset, boot as PID 0xF146.
+         * firmware delivered to that interface is received and discarded. */
+        response[1] = KHPI_STAT_SUCCESS;
+        PatchPid(0xF146u);                      /* sets flag + resets */
         break;
 
     case MODE_CMSIS_DAP2X:
     case MODE_CMSIS_DAP1X:
     case MODE_CMSIS_DAP2X_2UART:
-        /* Single-firmware implementation: acknowledge and reset so the
-         * host re-enumerates. Mode is always bulk+bridge+CDC. */
+        /* Single-firmware implementation: normal PID, clean re-enum */
         response[1] = KHPI_STAT_SUCCESS;
-        HandleReset();
+        PatchPid(DAP_FW_V1 ? 0xF152u : 0xF151u);/* sets flag + resets */
         break;
 
     case MODE_CUSTOM_APP:
@@ -294,7 +352,7 @@ static uint32_t HandleAcquire(const uint8_t *request, uint8_t *response)
     {
         extern void Delay_Ms(uint32_t n);
         Delay_Ms(150);   /* pacing: repeatable pattern for logic-analyzer capture */
-        acquired = SWD_AcquireTarget();
+        acquired = SWD_AcquireTarget(dut);
     }
 
     response[1] = KHPI_STAT_SUCCESS;

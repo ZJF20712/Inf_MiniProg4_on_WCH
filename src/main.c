@@ -114,6 +114,15 @@ void SysTick_Handler(void)
 void int_to_unicode(uint32_t value, uint8_t *pbuf, uint8_t len);
 void USB_Config(void)
 {
+    /* virtual bootloader mode: SRAM flag persists across the warm reset -
+     * re-enumerate as PID 0xF146 until the flag is cleared */
+    if ((*(volatile uint32_t *)0x20001800u & 0xFFFF0000u) == 0xB0070000u)
+    {
+        extern uint8_t USBD_DeviceDescriptor[];
+        uint16_t pid = *(volatile uint32_t *)0x20001800u & 0xFFFFu;
+        USBD_DeviceDescriptor[10] = (uint8_t)(pid & 0xFFu);   /* idProduct LSB */
+        USBD_DeviceDescriptor[11] = (uint8_t)(pid >> 8);      /* idProduct MSB */
+    }
     NVIC_InitTypeDef NVIC_InitStructure;
     EXTI_InitTypeDef EXTI_InitStructure;
 

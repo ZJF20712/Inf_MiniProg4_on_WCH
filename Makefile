@@ -16,6 +16,7 @@ SRCS := \
 	src/dap_usb.c \
 	src/khpi.c \
 	src/bridge.c \
+	src/i2c_hw.c \
 	src/led.c 	src/virtual_target.c \
 	src/debug.c \
 	src/vcom_serial.c \

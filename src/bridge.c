@@ -19,6 +19,7 @@
 #include "usb_sil.h"
 #include "bridge.h"
 #include "khpi.h"
+#include "i2c_hw.h"
 
 volatile uint8_t bridgeEnabled = 0;
 
@@ -48,6 +49,9 @@ void Bridge_OnOff(const uint8_t *request, uint8_t *response)
 {
     if (request[1] == 0x00u)        /* BRIDGE_ENABLE  */
     {
+        I2C_HW_Init();              /* I2C1 on PB6/PB7, 100k default */
+        if (i2cSpeed)
+            I2C_HW_SetSpeed(i2cSpeed);
         bridgeEnabled = 1;
         response[1] = CMD_STAT_SUCCESS;
     }
@@ -97,8 +101,15 @@ void Bridge_Process(void)
                              ((uint32_t)bridgeReq[4] << 8) |
                              ((uint32_t)bridgeReq[5] << 16) |
                              ((uint32_t)bridgeReq[6] << 24);
-            if (bridgeReq[1] == PROTOCOL_SPI) spiSpeed = speed;
-            else                              i2cSpeed = speed;
+            if (bridgeReq[1] == PROTOCOL_SPI)
+            {
+                spiSpeed = speed;
+            }
+            else
+            {
+                i2cSpeed = speed;
+                I2C_HW_SetSpeed(i2cSpeed);      /* live reconfigure (0 = 100k) */
+            }
             resp[1] = CMD_STAT_SUCCESS;
             Bridge_SendResponse(resp, 2);
         }
@@ -110,13 +121,48 @@ void Bridge_Process(void)
         break;
 
     case CMD_ID_RESTART_I2C_MSTR:
+        I2C_HW_Reset();                         /* bus recovery + re-init at set speed */
+        if (i2cSpeed)
+            I2C_HW_SetSpeed(i2cSpeed);
         resp[1] = CMD_STAT_SUCCESS;
         Bridge_SendResponse(resp, 2);
         break;
 
     case CMD_ID_I2C_TRANSACTION:
+    {
+        /* 0x88 [flags][len][addr][data...] -> [0x88][status][data...]
+         * flags bits[6:4]: 1/3=write (3 = no stop), 2/4=read;
+         * bit0 START, bit1 STOP, bit2 RESTART, bit3 READ */
+        uint8_t flags = bridgeReq[1];
+        uint8_t len   = bridgeReq[2];
+        uint8_t addr7 = bridgeReq[3];
+        uint8_t type  = (flags & 0x70u) >> 4;
+        uint8_t isRead = (type == 2u || type == 4u || (flags & 0x08u)) ? 1u : 0u;
+        uint8_t stop   = (flags & 0x02u) ? 1u : 0u;
+        uint8_t addr7e = (uint8_t)(addr7 >> 1); /* accept 8-bit form too */
+
+        if (isRead && len == 0u)
+        {
+            resp[1] = CMD_STAT_FAIL_INV_PAR;
+            Bridge_SendResponse(resp, 2);
+        }
+        else if (isRead)
+        {
+            uint8_t st = I2C_HW_Read(addr7e, &resp[2], len, stop);
+            resp[1] = st ? CMD_STAT_FAIL_OP_FAIL : CMD_STAT_SUCCESS;
+            Bridge_SendResponse(resp, 2u + len);
+        }
+        else
+        {
+            uint8_t st = I2C_HW_Write(addr7e, &bridgeReq[4], len, stop);
+            resp[1] = st ? CMD_STAT_FAIL_OP_FAIL : CMD_STAT_SUCCESS;
+            Bridge_SendResponse(resp, 2);
+        }
+        break;
+    }
+
     case CMD_ID_SPI_DATA_TRANSFER:
-        /* bus transactions require I2C/SPI master hardware wiring */
+        /* SPI bridge needs SPI master wiring (hardware table) */
         resp[1] = CMD_STAT_FAIL_OP_FAIL;
         Bridge_SendResponse(resp, 2);
         break;

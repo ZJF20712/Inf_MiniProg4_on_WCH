@@ -97,7 +97,7 @@
 #define HID_CLASS_DESC_HID          0x21
 #define HID_CLASS_DESC_REPORT       0x22
 
-extern const uint8_t USBD_DeviceDescriptor[];
+extern uint8_t USBD_DeviceDescriptor[];
 extern const uint8_t USBD_ConfigDescriptor[];
 extern const uint8_t USBD_StringLangID[];
 extern const uint8_t USBD_StringVendor[];

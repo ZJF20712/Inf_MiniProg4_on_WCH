@@ -10,7 +10,7 @@
 #include "usb_desc.h"
 
 /* Device descriptor: IAD composite, bcdDevice 1.01, iSerial from die UID */
-const uint8_t USBD_DeviceDescriptor[] = {
+uint8_t USBD_DeviceDescriptor[] = {  /* non-const: runtime PID switch */
     USBD_SIZE_DEVICE_DESC,              // bLength
     DEVICE_DESCRIPTOR,                  // bDescriptorType
     0x10, 0x02,                         // bcdUSB = 2.10 (BOS / MS OS 2.0)
