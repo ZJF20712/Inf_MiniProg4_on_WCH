@@ -1,0 +1,17 @@
+# build artifacts
+obj/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# OS / editor
+Thumbs.db
+*.bak
+*.swp
+*~
+
+# misc local files
+in.txt
