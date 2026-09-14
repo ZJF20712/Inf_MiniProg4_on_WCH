@@ -86,19 +86,33 @@ static const acq_family_t acqFamilies[6] = {
     { 1, { {0x05,0x00050210u}, {0x0D,0xEA7E30A9u} }, 2 },
 };
 
+/* Diagnostics of the last acquire attempt, echoed in the 0x85 response,
+ * kept PER PHASE (pin mapping 0/1) so phase 1 cannot clobber phase 0's
+ * results. v1 HID pads responses to 64 bytes, so the extra payload is
+ * invisible to hosts expecting the 3-byte legacy layout. */
+typedef struct {
+    uint8_t  idrAck[2], rbAck[2], reAck[2], phase;
+    uint16_t spins;
+    uint32_t idr[2], rbVal[2], reIdr[2];
+    uint8_t  initAck[2][5];
+} acq_diag_t;
+volatile acq_diag_t g_acqDiag;
+
 /* One acquire attempt on the CURRENT pin mapping (g_swdSwap): XRES pulse ->
  * handshake per family -> IDCODE -> family INIT incl. TMR unlock. dut:
  * 0=PSoC4/CCGx, 1=PSoC5, 2=PSoC6-BLE, 3=TVII, 4=CYW20829, 5=PSoC3 */
 static uint8_t SWD_AcquireOnce(uint8_t dut)
 {
-    extern volatile uint32_t SysTick_ms;
     uint32_t idr = 0;
-    uint32_t t0 = 0;
+    uint64_t t_stk;
+    uint32_t spins = 0;
     uint8_t ack;
     static const uint8_t lineResetBits[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03};
 
     uint8_t famIdx = (dut < 6u) ? dut : 0u;     /* unknown DUT -> PSoC4 path */
     const acq_family_t *fam = &acqFamilies[famIdx];
+    volatile acq_diag_t *d = &g_acqDiag;
+    const uint8_t ph = g_swdSwap & 1u;
 
     {
         extern void Delay_Ms(uint32_t n);
@@ -107,18 +121,29 @@ static uint8_t SWD_AcquireOnce(uint8_t dut)
         gi.GPIO_Mode  = GPIO_Mode_Out_PP;
         gi.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(nRESET_PORT, &gi);
-        GPIO_ResetBits(nRESET_PORT, nRESET_PIN);   /* assert reset (official 400us) */
-        Delay_Ms(1);
+        /* 5ms real pulse: the proven-working reset width (the old NOP-loop
+         * Delay_Ms(1) ran ~5.2ms). A 1ms pulse ACKs the first IDCODE but the
+         * TMR unlock write then kills the DAP - the chip needs the longer
+         * XRES before its test controller accepts the unlock. */
+        GPIO_ResetBits(nRESET_PORT, nRESET_PIN);   /* assert reset */
+        Delay_Ms(5);
         GPIO_SetBits(nRESET_PORT, nRESET_PIN);     /* release -> SWD window opens NOW */
 
         /* run at the official 1 MHz during the acquire: the CCG5 DAP window
          * after reset is only ~3 ms, and the INIT must finish inside it */
+        /* official 1MHz-ish clock: the ONLY SWD rate under which the full
+         * TMR-unlock INIT has survived on this target (512-row program OK).
+         * At 325kHz the DRW command write ACKs nothing and the DAP dies. */
         DAP_Data.clock_delay = 24U;
 
         /* official PSoC4 acquire hammers handshake+IDCODE for ~2.5ms after
-         * reset; the CCG5 DAP answers around 3 ms, cover 12ms to be safe */
-        t0 = SysTick_ms;
-        while ((SysTick_ms - t0) < 12u)
+         * reset; the CCG5 DAP answers around 3 ms, cover 12ms to be safe.
+         * Bound by the STK CNT hardware counter (immune to IRQ masking) plus
+         * an iteration backstop - a SysTick_ms bound once wedged this loop
+         * into an endless hammer with USB dead. */
+        t_stk = SysTick->CNT;
+        while (((SysTick->CNT - t_stk) < 30ull * (SystemCoreClock / 1000u)) &&
+               (++spins < 300u))
         {
             /* handshake: line reset + JTAG-to-SWD + line reset */
             SWJ_Sequence(51 + 1, lineResetBits);
@@ -133,9 +158,16 @@ static uint8_t SWD_AcquireOnce(uint8_t dut)
             ack = SWD_Transfer(DAP_TRANSFER_RnW, &idr);
             if ((ack == DAP_TRANSFER_OK) && (idr != 0u) && (idr != 0xFFFFFFFFu))
             {
+                d->idrAck[ph] = ack;
+                d->idr[ph]    = idr;
+                d->spins      = (uint16_t)spins;
                 goto acquired;
             }
+            idr = 0u;
         }
+        d->idrAck[ph] = (uint8_t)(ack & 7u);
+        d->idr[ph]    = idr;
+        d->spins      = (uint16_t)spins;
         Debug_Print("[SWD] window miss: last ack=%u idr=%08X\r\n", ack, idr);
         SWJ_Sequence(2, (const uint8_t *)"\x00");
         return 0u;
@@ -159,6 +191,12 @@ acquired:;
     ack2 = SWD_Transfer(DAP_TRANSFER_RnW, &idr);
     SWJ_Sequence(2, (const uint8_t *)"\x00");
 
+    for (uint8_t k = 0; k < 5; k++) d->initAck[ph][k] = a[k];
+    d->rbAck[ph]  = ack;
+    d->rbVal[ph]  = rbVal;
+    d->reAck[ph]  = ack2;
+    d->reIdr[ph]  = idr;
+
     Debug_Print("[SWD] DUT d%u idr=%08X init:%u,%u,%u,%u,%u rb:%u=%08X re-idr ack=%u %08X\r\n",
                 dut, idr, a[0], a[1], a[2], a[3], a[4], ack, rbVal, ack2, idr);
 
@@ -177,6 +215,7 @@ static uint8_t SWD_AcquireTarget(uint8_t dut)
     for (uint8_t phase = 0; phase < 2; phase++)
     {
         g_swdSwap = phase;
+        g_acqDiag.phase = phase;
         Debug_Print("[SWD] --- phase swap=%u ---\r\n", phase);
         if (SWD_AcquireOnce(dut))
         {
@@ -357,7 +396,43 @@ static uint32_t HandleAcquire(const uint8_t *request, uint8_t *response)
 
     response[1] = KHPI_STAT_SUCCESS;
     response[2] = acquired ? 1u : 0u;
-    return 3;
+    {
+        /* diagnostic echo, per phase: [3]=p0 idrAck [4..7]=p0 idr
+         * [8..12]=p0 initAck [13]=p0 rbAck [14]=p0 reAck, [15..27]=same for
+         * p1, [28]=SWDIO float level [29]=SWDIO driven-high readback
+         * [30]=nRESET idle [31..32]=hammer spins */
+        volatile acq_diag_t *d = &g_acqDiag;
+        for (uint8_t p = 0; p < 2; p++)
+        {
+            uint8_t o = (uint8_t)(3 + p * 12);
+            response[o]      = d->idrAck[p];
+            response[o + 1]  = (uint8_t)(d->idr[p] >> 24); response[o + 2]  = (uint8_t)(d->idr[p] >> 16);
+            response[o + 3]  = (uint8_t)(d->idr[p] >>  8); response[o + 4]  = (uint8_t)(d->idr[p]);
+            for (uint8_t k = 0; k < 5; k++) response[o + 5 + k] = d->initAck[p][k];
+            response[o + 10] = d->rbAck[p];
+            response[o + 11] = d->reAck[p];
+        }
+        response[27] = d->rbVal[0] != 0 ? 1 : 0;            /* legacy: rb nonzero flag */
+        response[28] = 0; response[29] = 0;
+        response[31] = (uint8_t)(d->spins >> 8); response[32] = (uint8_t)(d->spins);
+        /* true idle level of the SWDIO net: float the pin briefly and read
+         * it back - 0 means no board pull-up reaches the probe; then drive
+         * high and read again - 0 would mean a short to GND */
+        GPIO_InitTypeDef gi;
+        gi.GPIO_Pin   = SWDIO_PIN;
+        gi.GPIO_Mode  = GPIO_Mode_IN_FLOATING;
+        gi.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init(SWDIO_PORT, &gi);
+        for (volatile uint32_t i = 0; i < 2000u; i++) { __NOP(); }
+        response[28] = (uint8_t)PIN_SWDIO_IN();
+        gi.GPIO_Mode = GPIO_Mode_Out_PP;
+        GPIO_Init(SWDIO_PORT, &gi);
+        GPIO_SetBits(SWDIO_PORT, SWDIO_PIN);
+        for (volatile uint32_t i = 0; i < 200u; i++) { __NOP(); }
+        response[29] = (uint8_t)PIN_SWDIO_IN();
+        response[30] = (uint8_t)PIN_nRESET_IN();
+    }
+    return 33;
 }
 
 static uint32_t GetCapabilities(const uint8_t *request, uint8_t *response)

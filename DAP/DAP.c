@@ -1288,6 +1288,10 @@ static uint32_t DAP_Transfer(const uint8_t *request, uint8_t *response) {
 //   response: pointer to response data
 //   return:   number of bytes in response
 #if (DAP_SWD != 0)
+static uint32_t DAP_TransferBlock_Parse(const uint8_t *request,
+                                        uint32_t *count, uint32_t *request_value,
+                                        const uint8_t **data);
+
 static uint32_t DAP_SWD_TransferBlock(const uint8_t *request, uint8_t *response) {
   uint32_t  request_count;
   uint32_t  request_value;
@@ -1304,16 +1308,28 @@ static uint32_t DAP_SWD_TransferBlock(const uint8_t *request, uint8_t *response)
 
   DAP_TransferAbort = 0U;
 
-  request++;            // Ignore DAP index
+  request++;            // skip request[0] = ID_DAP_TransferBlock
 
-  request_count = (uint32_t)(*(request+0) << 0) |
-                  (uint32_t)(*(request+1) << 8);
-  request += 2;
+  // Both host layouts exist for SWD TransferBlock (see
+  // DAP_TransferBlock_Parse): KitProg3/Keil hosts put TRANSFER_COUNT at
+  // [1..2] and DAP_DATA at [3]; the CMSIS-DAP spec (pyOCD, OpenOCD) puts
+  // DAP_INDEX at [1], TRANSFER_COUNT at [2..3] and the request byte at [4].
+  // The wrong parse turned a 15-transfer read into a 3840-transfer write
+  // block and wedged the probe mid-row-program.
+  {
+    uint32_t count = 0u, value = 0u;
+    const uint8_t *data_ptr = NULL;
+    if (!DAP_TransferBlock_Parse(request - 1, &count, &value, &data_ptr)) {
+      goto end;                       // unrecognized layout: no transfers
+    }
+    request_count = count;
+    request_value = value;
+    request = data_ptr;
+  }
   if (request_count == 0U) {
     goto end;
   }
 
-  request_value = *request++;
   if ((request_value & DAP_TRANSFER_RnW) != 0U) {
     // Read register block
     if ((request_value & DAP_TRANSFER_APnDP) != 0U) {
@@ -1495,6 +1511,39 @@ end:
 #endif
 
 
+// TransferBlock request layouts in the wild (v1 HID, 64-byte packets):
+//   ARM/KitProg3 hosts:   [06][countL][countH][DAP_DATA][data...]
+//   CMSIS-DAP spec hosts  [06][DAP_INDEX][countL][countH][request][data...]
+//   (pyOCD, OpenOCD)
+// Discriminate by validity: DAP_DATA never has bit7 set, while a SWD request
+// byte always has start(bit0)=1 and park(bit7)=1; counts > (packet-4)/4 do
+// not fit a 64-byte response either way. Returns 1 on success and leaves
+// *data pointing at the first data word.
+static uint32_t DAP_TransferBlock_Parse(const uint8_t *request,
+                                        uint32_t *count, uint32_t *request_value,
+                                        const uint8_t **data) {
+  const uint8_t *p = request + 1;
+  uint32_t countA = (uint32_t)(p[0]) | ((uint32_t)(p[1]) << 8);   // [1..2]
+  uint8_t  flagsA = p[2];                                         // [3]
+  uint32_t countB = (uint32_t)(p[1]) | ((uint32_t)(p[2]) << 8);   // [2..3]
+  uint32_t maxCount = (DAP_PACKET_SIZE - 4u) / 4u;
+
+  if (countA != 0u && countA <= maxCount && (flagsA & 0xF0u) == 0u) {
+    *count = countA;
+    *request_value = flagsA;
+    *data = p + 3;
+    return 1u;
+  }
+  if (p[0] == 0u && countB != 0u && countB <= maxCount &&
+      (p[3] & 0x81u) == 0x81u) {
+    *count = countB;
+    *request_value = p[3];
+    *data = p + 4;
+    return 1u;
+  }
+  return 0u;
+}
+
 // Process Transfer Block command and prepare response
 //   request:  pointer to request data
 //   response: pointer to response data
@@ -1502,6 +1551,9 @@ end:
 //             number of bytes in request (upper 16 bits)
 static uint32_t DAP_TransferBlock(const uint8_t *request, uint8_t *response) {
   uint32_t num;
+  uint32_t count = 0u, request_value = 0u;
+  const uint8_t *data = NULL;
+  uint32_t valid = DAP_TransferBlock_Parse(request, &count, &request_value, &data);
 
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
@@ -1522,12 +1574,12 @@ static uint32_t DAP_TransferBlock(const uint8_t *request, uint8_t *response) {
       break;
   }
 
-  if ((*(request+3) & DAP_TRANSFER_RnW) != 0U) {
+  if (valid && ((request_value & DAP_TRANSFER_RnW) != 0U)) {
     // Read register block
     num |=  4U << 16;
   } else {
-    // Write register block
-    num |= (4U + (((uint32_t)(*(request+1)) | (uint32_t)(*(request+2) << 8)) * 4)) << 16;
+    // Write register block (or invalid/zero-count request: no data consumed)
+    num |= (4U + (valid ? count * 4u : 0u)) << 16;
   }
 
   return (num);

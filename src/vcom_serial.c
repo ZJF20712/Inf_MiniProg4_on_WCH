@@ -115,11 +115,9 @@ void VCOM_LineCoding(VCOM_LINE_CODING *LineCfgx)
     USART_InitStructure.USART_Mode = USART_Mode_Tx | USART_Mode_Rx;
     USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
 
-    __disable_irq();
-
+    /* NO global IRQ masking: this runs in USB request context (HPE fast
+     * ISR) and forcing GIE here wedged the whole interrupt system */
     USART_Init(USART2, &USART_InitStructure);
-
-    __enable_irq();
 }
 
 void VCOM_TransferData(void)

@@ -62,7 +62,11 @@ uint32_t USB_SIL_Read(uint8_t bEpAddr, uint8_t* pBufferPointer)
 {
   uint32_t DataLength = 0;
 
-  DataLength = GetEPRxCount(bEpAddr & 0x7F); 
+  DataLength = GetEPRxCount(bEpAddr & 0x7F);
+  /* Clamp: callers buffer 64 bytes max (FS bulk/HID packet size). A glitched
+   * RX count during heavy streaming made PMAToUserBufferCopy run past the
+   * buffer, smash the ISR stack and hard-fault the whole probe. */
+  if (DataLength > 64u) DataLength = 64u;
   PMAToUserBufferCopy(pBufferPointer, GetEPRxAddr(bEpAddr & 0x7F), DataLength);
 
   return DataLength;

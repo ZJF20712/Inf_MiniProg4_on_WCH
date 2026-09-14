@@ -33,6 +33,10 @@ int main(void)
 {
     SystemCoreClockUpdate();
 
+    /* SysTick first: Delay_Ms and TIMESTAMP_GET derive from STK CNT, and
+     * USB_Config already delays (usb_prop) before its former position */
+    SysTick_Config(SystemCoreClock / 1000);
+
     Debug_Init(115200);
     Debug_Print("\r\n=== WCH-MiniProg4 ===\r\nfw %d.%02d build %d | KHPI %d.%d | HWID 0x%02X | %s\r\n",
                 FW_VER_MAJOR, FW_VER_MINOR, FW_BUILD_NUMBER,
@@ -55,8 +59,6 @@ int main(void)
 
     USB_Config();
     Debug_Print("init: usb configured, main loop start\r\n");
-
-    SysTick_Config(SystemCoreClock / 1000);
 
     while (1)
     {
@@ -204,7 +206,13 @@ void USB_Port_Set(FunctionalState NewState, FunctionalState Pin_In_IPU)
 
 void Delay_Ms(uint32_t n)
 {
-    for (uint32_t i = 0; i < SystemCoreClock / 4000 * n; i++) __NOP();
+    /* Poll the STK CNT hardware counter (free-running at HCLK, keeps counting
+     * with interrupts disabled). The old NOP loop was codegen-calibrated and
+     * ran ~5x slow, which pushed the acquire hammer past the CCG5 DAP window.
+     * Requires SysTick_Config to have run (it now leads main()). */
+    uint64_t t0    = SysTick->CNT;
+    uint64_t ticks = (uint64_t)n * (SystemCoreClock / 1000u);
+    while ((SysTick->CNT - t0) < ticks) { }
 }
 
 void int_to_unicode(uint32_t value, uint8_t *pbuf, uint8_t len)
