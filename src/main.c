@@ -130,9 +130,11 @@ void USB_Config(void)
 
     /* runtime DAP mode: 0x82 mode switch persists PID F152(v1 HID)/F151(v2
      * bulk) in the same flag; select the descriptor set + EP roles + BOS
-     * MS-OS-2.0 total length to match */
+     * MS-OS-2.0 total length to match.
+     * Default (no flag, e.g. after power-up) = v2 bulk for PSoC Creator;
+     * the virtual bootloader (F146) always stays v1 HID for fw-loader. */
     extern uint8_t g_dapV2Mode;
-    g_dapV2Mode = (pid == 0xF151u);
+    g_dapV2Mode = (pid == 0xF151u) || (pid == 0x0000u);
     extern const uint8_t USBD_ConfigDescriptor_V1[];
     extern const uint8_t USBD_ConfigDescriptor_V2[];
     extern void USBD_SelectConfigDescriptor(const uint8_t *desc, uint16_t size);

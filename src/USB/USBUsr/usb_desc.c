@@ -19,9 +19,9 @@ uint8_t USBD_DeviceDescriptor[] = {  /* non-const: runtime PID switch */
     0x01,                               // bDeviceProtocol: IAD
     USB_MAX_EP0_SZ,                     // bMaxPacketSize0 = 8
     USBD_VID & 0xFF, USBD_VID >> 8,     // idVendor  = 0x04B4
-    0x52, 0xF1,                         // idProduct: boot default 0xF152 (v1 HID);
-                                        //   runtime-patched from the mode flag
-                                        //   (0xF151 = v2 bulk, 0xF146 = bootloader)
+    0x51, 0xF1,                         // idProduct: boot default 0xF151 (v2 bulk,
+                                        //   Creator-first); runtime-patched from the
+                                        //   mode flag (0xF152 = v1 HID, 0xF146 = bl)
     0x01, 0x01,                         // bcdDevice = 1.01
     0x01,                               // iManufacturer
     0x02,                               // iProduct
