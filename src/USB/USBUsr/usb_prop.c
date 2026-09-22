@@ -13,8 +13,7 @@
 
 uint8_t Request = 0;
 
-#ifdef DAP_FW_V1
-/* HID SET_REPORT / GET_REPORT buffers for CMSIS-DAP v1 */
+/* HID SET_REPORT / GET_REPORT support for CMSIS-DAP v1 (runtime mode) */
 #define HID_SET_REPORT  0x09
 #define HID_GET_REPORT  0x01
 static uint8_t hid_report_buf[64];
@@ -45,7 +44,6 @@ uint8_t *USB_HID_GetReport(uint16_t Length)
     }
     return hid_report_buf;
 }
-#endif
 
 DEVICE Device_Table =
 {
@@ -90,7 +88,8 @@ ONE_DESCRIPTOR Device_Descriptor =
 
 ONE_DESCRIPTOR Config_Descriptor =
 {
-    (uint8_t*)USBD_ConfigDescriptor,
+    (uint8_t*)USBD_ConfigDescriptor_V1,   /* boot default; USB_Config()
+                                             re-points it per the mode flag */
     USBD_SIZE_CONFIG_TOTAL
 };
 
@@ -164,7 +163,7 @@ void USBD_init(void)
 void USBD_Reset(void)
 {
     pInformation->Current_Configuration = 0;
-    pInformation->Current_Feature = USBD_ConfigDescriptor[7];
+    pInformation->Current_Feature = Config_Descriptor.Descriptor[7];
     pInformation->Current_Interface = 0;
 
     SetBTABLE(BTABLE_ADDRESS);
@@ -180,39 +179,43 @@ void USBD_Reset(void)
     _ClearDTOG_RX(ENDP0);
     _ClearDTOG_TX(ENDP0);
 
-#ifdef DAP_FW_V1
-    /* Endpoint 1: CMSIS-DAP v1 HID IN (probe -> host responses, interrupt) */
-    SetEPType(ENDP1, EP_INTERRUPT);
-    SetEPTxAddr(ENDP1, ENDP1_TXADDR);
-    SetEPTxCount(ENDP1, DAP_PACKET_SZ);
-    SetEPTxStatus(ENDP1, EP_TX_NAK);
-    SetEPRxStatus(ENDP1, EP_RX_STALL);
-    _ClearDTOG_TX(ENDP1);
+    extern uint8_t g_dapV2Mode;
+    if (!g_dapV2Mode)
+    {
+        /* Endpoint 1: CMSIS-DAP v1 HID IN (probe -> host responses, interrupt) */
+        SetEPType(ENDP1, EP_INTERRUPT);
+        SetEPTxAddr(ENDP1, ENDP1_TXADDR);
+        SetEPTxCount(ENDP1, DAP_PACKET_SZ);
+        SetEPTxStatus(ENDP1, EP_TX_NAK);
+        SetEPRxStatus(ENDP1, EP_RX_STALL);
+        _ClearDTOG_TX(ENDP1);
 
-    /* Endpoint 2: CMSIS-DAP v1 HID OUT (host -> probe commands, interrupt) */
-    SetEPType(ENDP2, EP_INTERRUPT);
-    SetEPRxAddr(ENDP2, ENDP2_RXADDR);
-    SetEPRxCount(ENDP2, DAP_PACKET_SZ);
-    SetEPRxStatus(ENDP2, EP_RX_VALID);
-    SetEPTxStatus(ENDP2, EP_TX_STALL);
-    _ClearDTOG_RX(ENDP2);
-#else
-    /* Endpoint 1: CMSIS-DAP v2 bulk OUT (host -> probe commands) */
-    SetEPType(ENDP1, EP_BULK);
-    SetEPRxAddr(ENDP1, ENDP1_RXADDR);
-    SetEPRxCount(ENDP1, DAP_PACKET_SZ);
-    SetEPRxStatus(ENDP1, EP_RX_VALID);
-    SetEPTxStatus(ENDP1, EP_TX_DIS);
-    _ClearDTOG_RX(ENDP1);
+        /* Endpoint 2: CMSIS-DAP v1 HID OUT (host -> probe commands, interrupt) */
+        SetEPType(ENDP2, EP_INTERRUPT);
+        SetEPRxAddr(ENDP2, ENDP2_RXADDR);
+        SetEPRxCount(ENDP2, DAP_PACKET_SZ);
+        SetEPRxStatus(ENDP2, EP_RX_VALID);
+        SetEPTxStatus(ENDP2, EP_TX_STALL);
+        _ClearDTOG_RX(ENDP2);
+    }
+    else
+    {
+        /* Endpoint 1: CMSIS-DAP v2 bulk OUT (host -> probe commands) */
+        SetEPType(ENDP1, EP_BULK);
+        SetEPRxAddr(ENDP1, ENDP1_RXADDR);
+        SetEPRxCount(ENDP1, DAP_PACKET_SZ);
+        SetEPRxStatus(ENDP1, EP_RX_VALID);
+        SetEPTxStatus(ENDP1, EP_TX_DIS);
+        _ClearDTOG_RX(ENDP1);
 
-    /* Endpoint 2: CMSIS-DAP v2 bulk IN (probe -> host responses) */
-    SetEPType(ENDP2, EP_BULK);
-    SetEPTxAddr(ENDP2, ENDP2_TXADDR);
-    SetEPTxCount(ENDP2, DAP_PACKET_SZ);
-    SetEPTxStatus(ENDP2, EP_TX_NAK);
-    SetEPRxStatus(ENDP2, EP_RX_DIS);
-    _ClearDTOG_TX(ENDP2);
-#endif /* DAP_FW_V1 */
+        /* Endpoint 2: CMSIS-DAP v2 bulk IN (probe -> host responses) */
+        SetEPType(ENDP2, EP_BULK);
+        SetEPTxAddr(ENDP2, ENDP2_TXADDR);
+        SetEPTxCount(ENDP2, DAP_PACKET_SZ);
+        SetEPTxStatus(ENDP2, EP_TX_NAK);
+        SetEPRxStatus(ENDP2, EP_RX_DIS);
+        _ClearDTOG_TX(ENDP2);
+    }
 
     /* Endpoint 3: CDC notification (interrupt IN) */
     SetEPType(ENDP3, EP_INTERRUPT);
@@ -321,8 +324,8 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
     Request_No = pInformation->USBbRequest;
     CopyRoutine = NULL;
 
-#ifdef DAP_FW_V1
-    if (Type_Recipient == (STANDARD_REQUEST | INTERFACE_RECIPIENT))
+    extern uint8_t g_dapV2Mode;
+    if (Type_Recipient == (STANDARD_REQUEST | INTERFACE_RECIPIENT) && !g_dapV2Mode)
     {
         uint8_t wValue1 = pInformation->USBwValue1;
         if (wValue1 == HID_REPORT_DESCRIPTOR)
@@ -341,14 +344,12 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
             return USB_SUCCESS;
         }
     }
-#endif
 
-#ifdef DAP_FW_V1
-    /* HID class requests on interface 0 */
-    if (Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
+    /* HID class requests on interface 0 (v1 mode only) */
+    if (!g_dapV2Mode && Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
     {
-        if (pInformation->USBwIndex0 == 0)   /* HID is interface 0 */
         {
+            (void)0;
             if (Request_No == HID_SET_REPORT)   /* 0x09: host sends DAP command */
             {
                 CopyRoutine = &USB_HID_SetReport;
@@ -366,7 +367,6 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
             }
         }
     }
-#endif
 
     if (Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
     {
@@ -420,4 +420,11 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
         }
     }
     return USB_SUCCESS;
+}
+
+/* runtime re-binding of the active configuration descriptor (v1/v2 mode) */
+void USBD_SelectConfigDescriptor(const uint8_t *desc, uint16_t size)
+{
+    Config_Descriptor.Descriptor      = (uint8_t*)desc;
+    Config_Descriptor.Descriptor_Size = size;
 }

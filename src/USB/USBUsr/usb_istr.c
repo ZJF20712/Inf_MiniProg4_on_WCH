@@ -112,30 +112,28 @@ void USB_Istr(void)
 * endpoint callbacks
 *******************************************************************************/
 
-#ifdef DAP_FW_V1
-/* HID mode: EP1 IN = responses, EP2 OUT = commands */
+/* DAP endpoints move with the runtime mode:
+ *   v1 HID : EP2 OUT = commands, EP1 IN = responses
+ *   v2 bulk: EP1 OUT = commands, EP2 IN = responses */
+void EP1_OUT_Callback(void)
+{
+    if (g_dapV2Mode) DAP_EndpointOut();
+}
+
 void EP2_OUT_Callback(void)
 {
-    Debug_Print("[HID] EP2 OUT data\r\n");
-    DAP_EndpointOut();
+    if (!g_dapV2Mode) DAP_EndpointOut();
 }
 
 void EP1_IN_Callback(void)
 {
-    DAP_EndpointInDone();
-}
-#else
-/* Bulk mode: EP1 OUT = commands, EP2 IN = responses */
-void EP1_OUT_Callback(void)
-{
-    DAP_EndpointOut();
+    if (!g_dapV2Mode) DAP_EndpointInDone();
 }
 
 void EP2_IN_Callback(void)
 {
-    DAP_EndpointInDone();
+    if (g_dapV2Mode) DAP_EndpointInDone();
 }
-#endif
 
 /* CDC data IN: packet accepted, allow VCOM to send next */
 void EP4_IN_Callback(void)
@@ -155,16 +153,6 @@ void EP7_OUT_Callback(void)
     Bridge_EndpointOut();
 }
 
-/* CTR_LP() walks the tables above; unused slots point to NOP_Process */
-#ifdef DAP_FW_V1
-/* HID mode: EP1 OUT and EP2 IN are unused for DAP */
-void EP1_OUT_Callback(void) {}
-void EP2_IN_Callback(void)  {}
-#else
-/* Bulk mode: EP1 IN and EP2 OUT are unused for DAP */
-void EP1_IN_Callback(void)  {}
-void EP2_OUT_Callback(void) {}
-#endif
 void EP3_OUT_Callback(void) {}
 void EP4_OUT_Callback(void) {}
 void EP5_IN_Callback(void)  {}

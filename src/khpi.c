@@ -297,11 +297,16 @@ static void HandleModeSwitch(const uint8_t *request, uint8_t *response)
         break;
 
     case MODE_CMSIS_DAP2X:
-    case MODE_CMSIS_DAP1X:
     case MODE_CMSIS_DAP2X_2UART:
-        /* Single-firmware implementation: normal PID, clean re-enum */
+        /* runtime v2 bulk mode: persist PID 0xF151, warm-reset, the USB
+         * stack then enumerates with the v2 descriptor set (WinUSB DAP) */
         response[1] = KHPI_STAT_SUCCESS;
-        PatchPid(DAP_FW_V1 ? 0xF152u : 0xF151u);/* sets flag + resets */
+        PatchPid(0xF151u);
+        break;
+
+    case MODE_CMSIS_DAP1X:
+        response[1] = KHPI_STAT_SUCCESS;
+        PatchPid(0xF152u);                  /* v1 HID */
         break;
 
     case MODE_CUSTOM_APP:

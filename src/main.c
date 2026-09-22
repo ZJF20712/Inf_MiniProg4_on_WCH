@@ -13,6 +13,7 @@
 #include "ch32v20x.h"
 #include "usb_lib.h"
 #include "usb_istr.h"
+#include "usb_desc.h"
 
 #include "DAP.h"
 #include "dap_usb.h"
@@ -118,13 +119,29 @@ void USB_Config(void)
 {
     /* virtual bootloader mode: SRAM flag persists across the warm reset -
      * re-enumerate as PID 0xF146 until the flag is cleared */
+    uint16_t pid = 0;
     if ((*(volatile uint32_t *)0x20001800u & 0xFFFF0000u) == 0xB0070000u)
     {
         extern uint8_t USBD_DeviceDescriptor[];
-        uint16_t pid = *(volatile uint32_t *)0x20001800u & 0xFFFFu;
+        pid = *(volatile uint32_t *)0x20001800u & 0xFFFFu;
         USBD_DeviceDescriptor[10] = (uint8_t)(pid & 0xFFu);   /* idProduct LSB */
         USBD_DeviceDescriptor[11] = (uint8_t)(pid >> 8);      /* idProduct MSB */
     }
+
+    /* runtime DAP mode: 0x82 mode switch persists PID F152(v1 HID)/F151(v2
+     * bulk) in the same flag; select the descriptor set + EP roles + BOS
+     * MS-OS-2.0 total length to match */
+    extern uint8_t g_dapV2Mode;
+    g_dapV2Mode = (pid == 0xF151u);
+    extern const uint8_t USBD_ConfigDescriptor_V1[];
+    extern const uint8_t USBD_ConfigDescriptor_V2[];
+    extern void USBD_SelectConfigDescriptor(const uint8_t *desc, uint16_t size);
+    extern uint8_t BOS_Descriptor[];
+    USBD_SelectConfigDescriptor(g_dapV2Mode ? USBD_ConfigDescriptor_V2 : USBD_ConfigDescriptor_V1,
+                                g_dapV2Mode ? USBD_SIZE_CONFIG_TOTAL_V2 : USBD_SIZE_CONFIG_TOTAL_V1);
+    BOS_Descriptor[29] = g_dapV2Mode ? 0x4A : 0xAE;   /* MS OS 2.0 set length */
+    BOS_Descriptor[30] = g_dapV2Mode ? 0x01 : 0x00;
+
     NVIC_InitTypeDef NVIC_InitStructure;
     EXTI_InitTypeDef EXTI_InitStructure;
 

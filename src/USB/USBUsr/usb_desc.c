@@ -19,7 +19,9 @@ uint8_t USBD_DeviceDescriptor[] = {  /* non-const: runtime PID switch */
     0x01,                               // bDeviceProtocol: IAD
     USB_MAX_EP0_SZ,                     // bMaxPacketSize0 = 8
     USBD_VID & 0xFF, USBD_VID >> 8,     // idVendor  = 0x04B4
-    USBD_PID & 0xFF, USBD_PID >> 8,     // idProduct = 0xF151 or 0xF152
+    0x52, 0xF1,                         // idProduct: boot default 0xF152 (v1 HID);
+                                        //   runtime-patched from the mode flag
+                                        //   (0xF151 = v2 bulk, 0xF146 = bootloader)
     0x01, 0x01,                         // bcdDevice = 1.01
     0x01,                               // iManufacturer
     0x02,                               // iProduct
@@ -27,8 +29,7 @@ uint8_t USBD_DeviceDescriptor[] = {  /* non-const: runtime PID switch */
     0x01                                // bNumConfigurations
 };
 
-#ifdef DAP_FW_V1
-/* ======================= HID mode (CMSIS-DAP v1) ======================= */
+/* ======================= HID mode (CMSIS-DAP v1) - runtime selectable ======================= */
 
 /* HID report descriptor: 33 bytes, standard CMSIS-DAP v1 format
  * (64-byte input/output reports, no report ID) */
@@ -57,7 +58,7 @@ const uint8_t USBD_HidReportDesc[] = {
  * IF2: CDC control (IAD grouped with IF3)    EP3 IN int
  * IF3: CDC data                              EP4 IN / EP5 OUT
  */
-const uint8_t USBD_ConfigDescriptor[] = {
+const uint8_t USBD_ConfigDescriptor_V1[] = {
     USBD_SIZE_CONFIG_DESC,              // bLength
     CONFIG_DESCRIPTOR,                  // bDescriptorType
     USBD_SIZE_CONFIG_TOTAL & 0xFF,
@@ -188,8 +189,7 @@ const uint8_t USBD_ConfigDescriptor[] = {
     0x00,
 };
 
-#else
-/* ======================= Bulk mode (CMSIS-DAP v2, default) ======================= */
+/* ======================= Bulk mode (CMSIS-DAP v2) - runtime selectable ======================= */
 
 /* Configuration descriptor, 121 bytes, 4 interfaces
  * IF0: CMSIS-DAP v2 (vendor bulk, WinUSB)   EP1 OUT / EP2 IN
@@ -197,11 +197,11 @@ const uint8_t USBD_ConfigDescriptor[] = {
  * IF2: CDC control (IAD grouped with IF3)   EP3 IN int
  * IF3: CDC data                             EP4 IN / EP5 OUT
  */
-const uint8_t USBD_ConfigDescriptor[] = {
+const uint8_t USBD_ConfigDescriptor_V2[] = {
     USBD_SIZE_CONFIG_DESC,              // bLength
     CONFIG_DESCRIPTOR,                  // bDescriptorType
-    USBD_SIZE_CONFIG_TOTAL & 0xFF,
-    USBD_SIZE_CONFIG_TOTAL >> 8,        // wTotalLength = 121
+    USBD_SIZE_CONFIG_TOTAL_V2 & 0xFF,
+    USBD_SIZE_CONFIG_TOTAL_V2 >> 8,     // wTotalLength = 121
     4,                                  // bNumInterfaces
     0x01,                               // bConfigurationValue
     0x00,                               // iConfiguration
@@ -316,7 +316,6 @@ const uint8_t USBD_ConfigDescriptor[] = {
     CDC_BULK_SZ, 0x00,
     0x00,
 };
-#endif /* DAP_FW_V1 */
 
 /* ---------------- String descriptors (shared between modes) ---------------- */
 
@@ -384,8 +383,7 @@ const uint8_t USBD_StringCDCData[] = {      /* index 7 */
     'c', 0, 'e', 0
 };
 
-#ifdef DAP_FW_V1
-/* ---- HID descriptor accessors ---- */
+/* ---- HID descriptor accessors (v1 mode only; harmless to build always) ---- */
 uint8_t *USBD_GetReportDescriptor(uint16_t Length)
 {
     static ONE_DESCRIPTOR report_descriptor =
@@ -401,12 +399,11 @@ uint8_t *USBD_GetHidDescriptor(uint16_t Length)
     /* The HID class descriptor is at offset 9+9=18 in the config descriptor */
     static ONE_DESCRIPTOR hid_descriptor =
     {
-        (uint8_t*)&USBD_ConfigDescriptor[18],
+        (uint8_t*)&USBD_ConfigDescriptor_V1[18],
         9
     };
     return Standard_GetDescriptorData(Length, &hid_descriptor);
 }
-#endif
 
 /* ---------------- BOS + MS OS 2.0 (WinUSB for bridge IF) ---------------- */
 
@@ -428,11 +425,8 @@ uint8_t BOS_Descriptor[] =
     0x9E, 0x64, 0x8A, 0x9F,
 
     0x00, 0x00, 0x03, 0x06,     // dwWindowsVersion: Windows 8.1+
-#ifdef DAP_FW_V1
-    0xAE, 0x00,                 // wTotalLength = 174: bridge only (HID uses hidusb)
-#else
-    0x4A, 0x01,                 // wTotalLength = 330: DAP + bridge
-#endif
+    0xAE, 0x00,                 // wTotalLength: patched at boot by mode
+                                  //   (174 = v1 bridge only, 330 = v2 DAP+bridge)
     WINUSB_VENDOR_CODE,         // bMS_VendorCode
     0x00                        // bAltEnumCmd
 };
@@ -443,32 +437,68 @@ uint8_t BOS_Descriptor[] =
 #define MS_OS_20_FEATURE_COMPATIBLE_ID        0x03
 #define MS_OS_20_FEATURE_REG_PROPERTY         0x04
 
-/* Descriptor set: WinUSB + DeviceInterfaceGUID */
-uint8_t MS_OS_20_DescriptorSet[] =
+/* Descriptor sets: WinUSB + DeviceInterfaceGUID, one per DAP mode.
+ * GUID mapping fixed to match official KitProg3:
+ *   IF0 CMSIS-DAP v2 = {CDB3B5AD-293B-4663-AA36-1AAE46463776}  (PSoC Creator)
+ *   IF1 bridge       = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}  (PSoC Programmer) */
+uint8_t MS_OS_20_DescriptorSet_V1[] =          /* 174 bytes: bridge only */
 {
     /*** header ***/
     10, 0,
     MS_OS_20_SET_HEADER_DESCRIPTOR, 0,
     0x00, 0x00, 0x03, 0x06,
-#ifdef DAP_FW_V1
     0xAE, 0x00,                 // 174: bridge only (HID uses hidusb driver)
-#else
-    0x4A, 0x01,                 // 330: DAP + bridge
-#endif
 
     /*** configuration subset ***/
     8, 0,
     MS_OS_20_SUBSET_HEADER_CONFIGURATION, 0,
     0,                          // bConfigurationValue
     0,
-#ifdef DAP_FW_V1
     0xA4, 0x00,                 // 164: bridge only (8 + 156)
-#else
-    0x40, 0x01,                 // 320: DAP + bridge (8+156+156)
-#endif
 
-#ifndef DAP_FW_V1
-    /*** function subset: IF0 CMSIS-DAP v2 (bulk only) ***/
+    /*** function subset: IF1 bridge ***/
+    8, 0,
+    MS_OS_20_SUBSET_HEADER_FUNCTION, 0,
+    1,                          // bFirstInterface: bridge is IF1
+    0,
+    8+20+128, 0,                // 156
+
+    20, 0,
+    MS_OS_20_FEATURE_COMPATIBLE_ID, 0,
+    'W',  'I',  'N',  'U',  'S',  'B',  0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+    128, 0,
+    MS_OS_20_FEATURE_REG_PROPERTY, 0,
+    1, 0,
+    40, 0x00,
+    'D', 0, 'e', 0, 'v', 0, 'i', 0, 'c', 0, 'e', 0, 'I', 0, 'n', 0,
+    't', 0, 'e', 0, 'r', 0, 'f', 0, 'a', 0, 'c', 0, 'e', 0, 'G', 0,
+    'U', 0, 'I', 0, 'D', 0,   0, 0,
+    78, 0x00,
+    '{', 0, '8', 0, '8', 0, 'B', 0, 'A', 0, 'E', 0, '3', 0, '2', 0,   /* bridge */
+    '2', 0, '-', 0, '5', 0, 'A', 0, '8', 0, '1', 0, '-', 0, '4', 0,
+    '9', 0, 'f', 0, '0', 0, '-', 0, 'B', 0, 'C', 0, '3', 0, 'D', 0,
+    '-', 0, 'A', 0, '4', 0, 'F', 0, 'F', 0, '1', 0, '3', 0, '8', 0,
+    '2', 0, '1', 0, '6', 0, 'D', 0, '6', 0, '}', 0,   0, 0
+};
+
+uint8_t MS_OS_20_DescriptorSet_V2[] =          /* 330 bytes: DAP v2 + bridge */
+{
+    /*** header ***/
+    10, 0,
+    MS_OS_20_SET_HEADER_DESCRIPTOR, 0,
+    0x00, 0x00, 0x03, 0x06,
+    0x4A, 0x01,                 // 330: DAP + bridge
+
+    /*** configuration subset ***/
+    8, 0,
+    MS_OS_20_SUBSET_HEADER_CONFIGURATION, 0,
+    0,                          // bConfigurationValue
+    0,
+    0x40, 0x01,                 // 320: DAP + bridge (8+156+156)
+
+    /*** function subset: IF0 CMSIS-DAP v2 bulk ***/
     8, 0,
     MS_OS_20_SUBSET_HEADER_FUNCTION, 0,
     0,                          // bFirstInterface
@@ -488,21 +518,16 @@ uint8_t MS_OS_20_DescriptorSet[] =
     't', 0, 'e', 0, 'r', 0, 'f', 0, 'a', 0, 'c', 0, 'e', 0, 'G', 0,
     'U', 0, 'I', 0, 'D', 0,   0, 0,
     78, 0x00,
-    '{', 0, '8', 0, '8', 0, 'B', 0, 'A', 0, 'E', 0, '3', 0, '2', 0,   /* {88BAE032-5A81-49f0-BC3D-A4FF138216D6} */
-    '2', 0, '-', 0, '5', 0, 'A', 0, '8', 0, '1', 0, '-', 0, '4', 0,
-    '9', 0, 'f', 0, '0', 0, '-', 0, 'B', 0, 'C', 0, '3', 0, 'D', 0,
-    '-', 0, 'A', 0, '4', 0, 'F', 0, 'F', 0, '1', 0, '3', 0, '8', 0,
-    '2', 0, '1', 0, '6', 0, 'D', 0, '6', 0, '}', 0,   0, 0,
-#endif /* !DAP_FW_V1 */
+    '{', 0, 'C', 0, 'D', 0, 'B', 0, '3', 0, 'B', 0, '5', 0, 'A', 0,   /* CMSIS-DAP v2 */
+    'D', 0, '-', 0, '2', 0, '9', 0, '3', 0, 'B', 0, '-', 0, '4', 0,
+    '6', 0, '6', 0, '3', 0, '-', 0, 'A', 0, 'A', 0, '3', 0, '6', 0,
+    '-', 0, '1', 0, 'A', 0, 'A', 0, 'E', 0, '4', 0, '6', 0, '4', 0,
+    '6', 0, '3', 0, '7', 0, '7', 0, '6', 0, '}', 0,   0, 0,
 
-    /*** function subset: bridge (always present) ***/
+    /*** function subset: IF1 bridge ***/
     8, 0,
     MS_OS_20_SUBSET_HEADER_FUNCTION, 0,
-#ifdef DAP_FW_V1
     1,                          // bFirstInterface: bridge is IF1
-#else
-    1,                          // bFirstInterface: bridge is IF1
-#endif
     0,
     8+20+128, 0,                // 156
 
@@ -519,11 +544,11 @@ uint8_t MS_OS_20_DescriptorSet[] =
     't', 0, 'e', 0, 'r', 0, 'f', 0, 'a', 0, 'c', 0, 'e', 0, 'G', 0,
     'U', 0, 'I', 0, 'D', 0,   0, 0,
     78, 0x00,
-    '{', 0, 'C', 0, 'D', 0, 'B', 0, '3', 0, 'B', 0, '5', 0, 'A', 0,   /* {CDB3B5AD-293B-4663-AA36-1AAE46463776} */
-    'D', 0, '-', 0, '2', 0, '9', 0, '3', 0, 'B', 0, '-', 0, '4', 0,
-    '6', 0, '6', 0, '3', 0, '-', 0, 'A', 0, 'A', 0, '3', 0, '6', 0,
-    '-', 0, '1', 0, 'A', 0, 'A', 0, 'E', 0, '4', 0, '6', 0, '4', 0,
-    '6', 0, '3', 0, '7', 0, '7', 0, '6', 0, '}', 0,   0, 0
+    '{', 0, '8', 0, '8', 0, 'B', 0, 'A', 0, 'E', 0, '3', 0, '2', 0,   /* bridge */
+    '2', 0, '-', 0, '5', 0, 'A', 0, '8', 0, '1', 0, '-', 0, '4', 0,
+    '9', 0, 'f', 0, '0', 0, '-', 0, 'B', 0, 'C', 0, '3', 0, 'D', 0,
+    '-', 0, 'A', 0, '4', 0, 'F', 0, 'F', 0, '1', 0, '3', 0, '8', 0,
+    '2', 0, '1', 0, '6', 0, 'D', 0, '6', 0, '}', 0,   0, 0
 };
 
 uint8_t *USBD_GetBOSDescriptor(uint16_t Length)
@@ -539,11 +564,11 @@ uint8_t *USBD_GetBOSDescriptor(uint16_t Length)
 
 uint8_t *USBD_MS_OS_20_DescriptorSet(uint16_t Length)
 {
-    static ONE_DESCRIPTOR ms_os_20_descriptorSet =
-    {
-        (uint8_t*)MS_OS_20_DescriptorSet,
-        sizeof(MS_OS_20_DescriptorSet)
-    };
-
+    extern uint8_t g_dapV2Mode;
+    static ONE_DESCRIPTOR ms_os_20_descriptorSet;
+    ms_os_20_descriptorSet.Descriptor = g_dapV2Mode ? MS_OS_20_DescriptorSet_V2
+                                                    : MS_OS_20_DescriptorSet_V1;
+    ms_os_20_descriptorSet.Descriptor_Size = g_dapV2Mode ? sizeof(MS_OS_20_DescriptorSet_V2)
+                                                        : sizeof(MS_OS_20_DescriptorSet_V1);
     return Standard_GetDescriptorData(Length, &ms_os_20_descriptorSet);
 }

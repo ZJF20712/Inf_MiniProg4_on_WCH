@@ -46,14 +46,18 @@ volatile uint32_t g_diagExec = 0;
 
 static void DAP_SendResponse(void)
 {
-#ifdef DAP_FW_V1
-    /* HID: always send full 64-byte report (no report ID, padded) */
-    USB_SIL_Write(EP1_IN, (uint8_t *)USB_Response[RespOut], DAP_PACKET_SIZE);
-    SetEPTxValid(ENDP1);
-#else
-    USB_SIL_Write(EP2_IN, (uint8_t *)USB_Response[RespOut], USB_ResponseSize[RespOut]);
-    SetEPTxValid(ENDP2);
-#endif
+    if (g_dapV2Mode)
+    {
+        /* Bulk: short response, no padding, no report ID */
+        USB_SIL_Write(EP2_IN, (uint8_t *)USB_Response[RespOut], USB_ResponseSize[RespOut]);
+        SetEPTxValid(ENDP2);
+    }
+    else
+    {
+        /* HID: always send full 64-byte report (no report ID, padded) */
+        USB_SIL_Write(EP1_IN, (uint8_t *)USB_Response[RespOut], DAP_PACKET_SIZE);
+        SetEPTxValid(ENDP1);
+    }
 
     uint32_t n = RespOut + 1;
     if (n == DAP_PACKET_COUNT) n = 0;
@@ -70,6 +74,11 @@ void DAP_EndpointInDone(void)
     RespIdle = 1;
 }
 
+/* Runtime DAP transport mode: 0 = v1 HID (PID 0xF152), 1 = v2 bulk
+ * (PID 0xF151). Set by USB_Config() from the persisted SRAM flag and
+ * switched by KHPI 0x82 (mode switch) + warm reset. */
+uint8_t g_dapV2Mode = 0;
+
 /* Called by EP OUT interrupt context (EP1 bulk / EP2 HID).
  * NOTE: no __disable_irq/__enable_irq here - this runs in the WCH HPE fast
  * USB ISR where forcing GIE wedged the whole interrupt system (SysTick and
@@ -79,13 +88,16 @@ void DAP_EndpointOut(void)
 {
     uint8_t buf[DAP_PACKET_SIZE];
 
-#ifdef DAP_FW_V1
-    USB_SIL_Read(EP2_OUT, buf);         /* HID: commands arrive on EP2 OUT */
-    SetEPRxStatus(ENDP2, EP_RX_VALID);
-#else
-    USB_SIL_Read(EP1_OUT, buf);         /* Bulk: commands arrive on EP1 OUT */
-    SetEPRxStatus(ENDP1, EP_RX_VALID);
-#endif
+    if (g_dapV2Mode)
+    {
+        USB_SIL_Read(EP1_OUT, buf);         /* Bulk: commands arrive on EP1 OUT */
+        SetEPRxStatus(ENDP1, EP_RX_VALID);
+    }
+    else
+    {
+        USB_SIL_Read(EP2_OUT, buf);         /* HID: commands arrive on EP2 OUT */
+        SetEPRxStatus(ENDP2, EP_RX_VALID);
+    }
 
     if (buf[0] == ID_DAP_TransferAbort)
     {
